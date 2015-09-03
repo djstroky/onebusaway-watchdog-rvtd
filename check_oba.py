@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-Copyright 2013 Georgia Institute of Technology
+Copyright 2015 Georgia Institute of Technology & Evan Siroky
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,336 +16,394 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-import urllib2
-import urllib
-import json
-import datetime
+import ConfigParser
 import csv
-import time
-
-import textmarks_v2api_client
-
+import datetime
+import email
+import json
+import imaplib
 import os
 import smtplib
+import time
+import urllib2
+import urllib
 
-from email import Encoders
-from email.MIMEBase import MIMEBase
-from email.MIMEMultipart import MIMEMultipart
-from email.Utils import formatdate
 from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.utils import formatdate
 
-#####PARAMETERS#######
-realtime_agencies = ['MARTA'] #Agency ids for agencies with realtime data.
-alert_list = ["user1@gmail.com" , "user2@gatech.edu" , "user3@gmail.com"] #These people get an email every time there is an alert.
-report_list = ["user1@gmail.com" , "user2@gatech.edu" , "user3@gmail.com"] #These people get an email every time that check_oba.py is run
-from_address = 'onebusawayatl@gatech.edu'
+config_filename = 'path\to\watchdog.ini'
+config = ConfigParser.ConfigParser()
+config.read(config_filename)
 
-csv_status_file = '/home/derek/OBA_Alerts/alert_status.csv'
-root_url = 'http://onebusaway.gatech.edu/api'
+def get_config(key):
+    return config.get('DEFAULT', key)
 
-report_frequency = 15 #This is how often a report is generated.  Measured in minutes.
+# PARAMETERS
 
-START_OF_DAY = 6 #The hour that we start checking, we stop at midnight
-HOST = 'imap.gmail.com'
-USERNAME = 'onebusawayatl'
-PASSWORD = 'emailpassword'
+# Agency ids for agencies with realtime data.
+realtime_agencies = get_config('realtime_agencies').split(',')
+# These people get an email every time there is an alert.
+alert_list = get_config('alert_list').split(',') 
+# These people get an email every time that check_oba.py is run
+report_list = get_config('report_list').split(',')
+from_address = get_config('from_address')
+
+csv_status_file = get_config('csv_status_file')
+report_status_file = get_config('report_status_file')
+root_url = get_config('root_url')
+
+# If 1, report, else don't.  index 0 = Monday, 6 = Sunday
+days_of_week_to_report = map(int, get_config('days_of_week_to_report').split(','))
+# The hours when a report gets sent.  SPECIFY AT LEAST TWO HOURS
+report_hours = map(int, get_config('report_hours').split(','))  
+# The hour that we start checking, we stop at midnight
+START_OF_DAY = int(get_config('start_of_day'))
+END_OF_DAY = int(get_config('end_of_day'))
+
+API_KEY = get_config('api_key')
+
+IMAP_HOST = get_config('imap_host')
+SMTP_HOST = get_config('smtp_host')
+USERNAME = get_config('username')
+PASSWORD = get_config('password')
 #######################
 
-def getAgencies(apiURL, attempts=0):
-        base = apiURL + '/api/where/agencies-with-coverage.json?'
-        query = urllib.urlencode({'key' : 'TEST'})
 
-        try:
-                response = urllib2.urlopen(base + query, timeout=30).read()
-        except IOError as e:
-		if attempts > 3:
-			return False, 'Unable to open:  ' + base + query
-		else:
-			time.sleep(20)
-			print 'getAgencies sleeping'
-			return(getAgencies(apiURL, attempts+1))
+def get_agencies(apiURL, attempts=0):
+    
+    base = apiURL + '/api/where/agencies-with-coverage.json?'
+    query = urllib.urlencode(dict(key=API_KEY))
 
-        except urllib2.URLError, e:
-                return False, "Timeout when opening:  " + base + query
-        try:
-                data = json.loads(response)
-        except ValueError:
-                return False, 'NO JSON Data in getAgencies: ' + base + query
-        except error:
-                return False, 'UNKNOWN ERROR in getAgencies' + base + query
+    try:
+        response = urllib2.urlopen(base + query, timeout=30).read()
+    except urllib2.HTTPError as e:
+        return False, 'Received HTTP Error: {0}'.format(e.code)
+    except IOError as e:
+        if attempts > 3:
+            return False, 'Unable to open:  ' + base + query
+        else:
+            time.sleep(20)
+            # print 'get_agencies sleeping'
+            return(get_agencies(apiURL, attempts + 1))
 
-        try:
-                agencies = data['data']['list']
-        except KeyError:
-                return False, 'Agency list not formatted as expected: ' + base + query
-        return True, agencies
+    except urllib2.URLError, e:
+        return False, "Timeout when opening:  " + base + query
+    
+    try:
+        data = json.loads(response)
+    except ValueError:
+        return False, 'NO JSON Data in get_agencies: ' + base + query
+    except:
+        return False, 'UNKNOWN ERROR in get_agencies' + base + query
 
-
-def getStops(apiURL, agency, attempts=0):
-        base = apiURL + '/api/where/stop-ids-for-agency/' + agency['agencyId'] + '.json?'
-        query = urllib.urlencode({'key' : 'TEST'})
-
-        try:
-                response = urllib.urlopen(base + query).read()
-        except IOError as e:
-		if attempts > 3:
-			return False, 'Unable to open:  ' + base + query
-		else:
-			time.sleep(20)
-			print 'getStops sleeping'
-			return(getStops(apiURL, agency, attempts+1))
-
-        except urllib2.URLError, e:
-                return False, "Timeout when opening:  " + base + query
-
-        try:
-                data = json.loads(response)
-        except ValueError:
-                return False, 'NO JSON Data in getStops: ' + base + query
-        except error:
-                return False, 'UNKNOWN ERROR in getStops' + base + query
+    try:
+        agencies = data['data']['list']
+    except KeyError:
+        return False, 'Agency list not formatted as expected: ' + base + query
+    return True, agencies
 
 
-        try:
-                stops = data['data']['list']
-        except KeyError:
-                return False, 'Stops list not formatted as expected: ' + base + query
+def get_stops(apiURL, agency, attempts=0):
+    
+    base = apiURL + '/api/where/stop-ids-for-agency/' + agency['agencyId'] + '.json?'
+    query = urllib.urlencode(dict(key=API_KEY))
 
-        return True, stops
+    try:
+        response = urllib.urlopen(base + query).read()
+    except IOError:
+        if attempts > 3:
+            return False, 'Unable to open:  ' + base + query
+        else:
+            time.sleep(20)
+            # print 'get_stops sleeping'
+            return(get_stops(apiURL, agency, attempts + 1))
 
-def checkArrivals(apiURL, stop, arr, attempts=0):
-        base = apiURL + '/api/where/arrivals-and-departures-for-stop/' + stop + '.json?'
+    except urllib2.URLError:
+        return False, "Timeout when opening:  " + base + query
 
-        # Checks arrivals and departures for a stop that occur only in the next 10 minutes because we don't really care about buses from the past or too far into the future.
-        query = urllib.urlencode({'key' : 'TEST', 'minutesAfter' : '10', 'minutesBefore' : '0'})
+    try:
+        data = json.loads(response)
+    except ValueError:
+        return False, 'NO JSON Data in get_stops: ' + base + query
+    except:
+        return False, 'UNKNOWN ERROR in get_stops' + base + query
 
-        try:
-                response = urllib.urlopen(base + query).read()
-        except IOError as e:
-		if attempts > 3:
-			return False, 'Unable to open:  ' + base + query
-		else:
-			time.sleep(20)
-			print 'checkArrivals sleeping'
-			return(checkArrivals(apiURL, stop, arr, attempts+1))
+    try:
+        stops = data['data']['list']
+    except KeyError:
+        return False, 'Stops list not formatted as expected: ' + base + query
 
-        except urllib2.URLError, e:
-                return False, "Timeout when opening:  " + base + query
+    return True, stops
 
-        try:
-                data = json.loads(response)
-        except ValueError:
-			return False, 'NO JSON Data in getStops: ' + base + query
-        except error:
-                return False, 'UNKNOWN ERROR in getStops' + base + query
 
-        try:
-                arrivals = data['data']['entry']['arrivalsAndDepartures']
-        except KeyError:
-                return False, 'Arrivals list not formatted as expected: ' + base + query
+def check_arrivals(apiURL, stop, arr, attempts=0):
+    
+    base = apiURL + '/api/where/arrivals-and-departures-for-stop/' + stop + '.json?'
 
-        for arrival in arrivals:
-                # Check for number of predicted vs. scheduled arrivals
-                if arrival['predicted']:
-                        arr['predicted'] += 1
+    # Checks arrivals and departures for a stop that occur only in the next 10 minutes because we don't really care about buses from the past or too far into the future.
+    query = urllib.urlencode(dict(key=API_KEY, 
+                                  minutesAfter='10',
+                                  minutesBefore='0'))
 
-                        # Check for number of "perfect" predictions, i.e., predicted equals scheduled
-                        if arrival['predictedArrivalTime'] == arrival['scheduledArrivalTime']:
-                                arr['perfect'] += 1
-                else:
-                        arr['scheduled'] += 1
-        return True, ""
+    try:
+        response = urllib.urlopen(base + query).read()
+    except IOError:
+        if attempts > 3:
+            return False, 'Unable to open:  ' + base + query
+        else:
+            time.sleep(20)
+            # print 'check_arrivals sleeping'
+            return(check_arrivals(apiURL, stop, arr, attempts + 1))
 
-#Check the OBA email to see if this code has been resolved.
-#If it has, clear the alert and send an email to everyone on the Alert list.
+    except urllib2.URLError:
+        return False, "Timeout when opening:  " + base + query
+
+    try:
+        data = json.loads(response)
+    except ValueError:
+        return False, 'NO JSON Data in get_stops: ' + base + query
+    except:
+        return False, 'UNKNOWN ERROR in get_stops' + base + query
+
+    try:
+        arrivals = data['data']['entry']['arrivalsAndDepartures']
+    except KeyError:
+        return False, 'Arrivals list not formatted as expected: ' + base + query
+
+    for arrival in arrivals:
+        # Check for number of predicted vs. scheduled arrivals
+        if arrival['predicted']:
+            arr['predicted'] += 1
+
+            # Check for number of "perfect" predictions, i.e., predicted equals scheduled
+            if arrival['predictedArrivalTime'] == arrival['scheduledArrivalTime']:
+                arr['perfect'] += 1
+        else:
+            arr['scheduled'] += 1
+    return True, ""
+
+
 def check_for_resolution(code, description):
-	from datetime import datetime, timedelta
-	import email
-	from imapclient import IMAPClient
+    # Check the OBA email to see if this code has been resolved.
+    # If it has, clear the alert and send an email to everyone on the Alert list.
+    
+    today = datetime.datetime.today()
+    cutoff = today - datetime.timedelta(days=1)
 
-	ssl = True
+    # Connect, login and select the INBOX
+    server = imaplib.IMAP4_SSL(IMAP_HOST)
+    server.login(USERNAME, PASSWORD)
+    server.list()
+    # Out: list of "folders" aka labels in gmail.
+    server.select("inbox")  # connect to inbox
 
-	today = datetime.today()
-	cutoff = today - timedelta(days=1)
+    # Search for relevant messages
+    # see http://tools.ietf.org/html/rfc3501#section-6.4.5
+    result, data = server.search(None, '(SINCE %s)' % cutoff.strftime('%d-%b-%Y'))
+    
+    ids = data[0]  # data is a list.
+    id_list = ids.split()  # ids is a space separated string
+    
+    resolved = False
+    
+    for email_id in id_list:
+        result, data = server.fetch(email_id, '(RFC822)')
+        
+        msg = email.message_from_string(data[0][1])
+        
+        # Pulls the body of the solution email.
+        body = ''
+        for part in msg.walk():
+            if part.get_content_type() == 'text/plain':
+                body += str(part.get_payload()) + '\n'
+                
+        if msg['Subject'].find("Re: OBA Alert!: {0}.".format(code)) > -1:
+            resolved = True
+            resolver = msg['From']
+            time_resolved = msg['date']
+            break
+                
+    if resolved:
+        clear_alert(code, description)
+        resolution_msg_template = "OBA Alert: {0}, {1} \nwas resolved by {2} at {3}.\n\nSOLUTION:  {4}"
+        send_gmail(alert_list, 
+                   resolution_msg_template.format(code,
+                                                  description,
+                                                  resolver,
+                                                  time_resolved,
+                                                  body), 
+                   "OBA Alert Resolved!: {0}.".format(code))
+        return True
+    else:
+        return False
 
-        ## Connect, login and select the INBOX
-	server = IMAPClient(HOST, use_uid=True, ssl=ssl)
-	server.login(USERNAME, PASSWORD)
-	select_info = server.select_folder('INBOX')
 
-       ## Search for relevant messages
-       ## see http://tools.ietf.org/html/rfc3501#section-6.4.5
-	messages = server.search(
-		['SINCE %s' % cutoff.strftime('%d-%b-%Y')])
-	response = server.fetch(messages, ['RFC822'])
+def send_gmail(recipients, message, subject):
 
-	target_subject = "Re: OBA Alert!: " + str(code) + '.'
-	resolved = False
-	for msgid, data in response.iteritems():
-		msg_string = data['RFC822']
-		msg = email.message_from_string(msg_string)
-		subject =  msg['Subject']
+    FROM = from_address
 
-		#Pulls the body of the solution email.
-		body = ''
-		for part in msg.walk():
-			if part.get_content_type() == 'text/plain':
-				body += str(part.get_payload()) + '\n'
+    msg = MIMEMultipart()
+    msg["From"] = FROM
+    msg["Subject"] = subject
+    msg['Date'] = formatdate(localtime=True)
+    message1 = MIMEText(message, 'plain')
+    msg.attach(message1)
 
-		if subject == target_subject:
-			resolved = True
-			resolver = msg['From']
-			time_resolved = msg['date']
-			break
-	if resolved:
-		clear_alert(code, description)
-		description = "OBA Alert: " + str(code) + ", " + description + "\nwas resolved by " + resolver + ' at ' + time_resolved + '.' 
-		description += "\n\nSOLUTION:  " + body
+    # The actual mail send
+    server = smtplib.SMTP(SMTP_HOST)
+    server.starttls()
+    server.login(USERNAME, PASSWORD)
+    server.sendmail(FROM, recipients, msg.as_string())
+    server.close()
 
-		sendGmail(alert_list, description ,"OBA Alert Resolved!: " + str(code) + '.' )
-		return True
-	else:
-		return False
-
-def sendGmail(recipients, message, subject):
-
-	FROM = from_address
-
-        msg = MIMEMultipart()
-        msg["From"] = FROM
-        msg["Subject"] = subject
-        msg['Date'] = formatdate(localtime=True)
-        message1 = MIMEText(message, 'plain')
-        msg.attach(message1)
-
-        # The actual mail send
-        server = smtplib.SMTP('smtp.gmail.com:587')
-        server.starttls()
-        server.login(USERNAME,PASSWORD)
-
-	for recipient in recipients:
-		TO  = recipient
-		server.sendmail(FROM, TO, msg.as_string())#.as_string())
-
-        server.quit()
 
 def clear_alert(code, description):
 
-	#Update the status code in the alert_status.csv file
-	status_file = open(csv_status_file, 'wb')
-	status_array = []
-	status_array.append({'status':0, 'code':code, 'description':description})
-	fieldnames = ['status', 'code', 'description']
-	writer = csv.DictWriter(status_file, delimiter=',', fieldnames=fieldnames)
-	writer.writerow(dict((fn,fn) for fn in fieldnames))
-	for row in status_array:
-		writer.writerow(row)
+    # Update the status code in the alert_status.csv file
+    status_file = open(csv_status_file, 'wb')
+    status_array = []
+    status_array.append({'status': 0, 'code': code, 'description': description})
+    fieldnames = ['status', 'code', 'description']
+    writer = csv.DictWriter(status_file, delimiter=',', fieldnames=fieldnames)
+    writer.writerow(dict((fn, fn) for fn in fieldnames))
+    for row in status_array:
+        writer.writerow(row)
 
 
 def create_alert(description):
-	#Get the previous code
-	status_file = open(csv_status_file)
-        reader = csv.DictReader(status_file)
-	for row in reader:
-		code =  int(row['code'])
-		break
-	status_file.close()
-	code += 1
+    
+    # Get the previous code
+    status, code, existing_description = get_alert_status()
+    code += 1
+    
+    # Send the relevant emails and texts
+    send_gmail(alert_list, description, "OBA Alert!: " + str(code) + '.')
 
-	#Send the relevant emails and texts
-	sendGmail(alert_list, description ,"OBA Alert!: " + str(code) + '.' )
+    # Update the status code in the alert_status.csv file
+    status_file = open(csv_status_file, 'wb')
+    status_array = [{'status': 1, 'code': code, 'description': description}]
+    fieldnames = ['status', 'code', 'description']
+    writer = csv.DictWriter(status_file, delimiter=',', fieldnames=fieldnames)
+    writer.writerow(dict((fn, fn) for fn in fieldnames))
+    for row in status_array:
+        writer.writerow(row)
 
-	#Update the status code in the alert_status.csv file
-	status_file = open(csv_status_file, 'wb')
-	status_array = []
-	status_array.append({'status':1, 'code':code, 'description':description})
-	fieldnames = ['status', 'code', 'description']
-	writer = csv.DictWriter(status_file, delimiter=',', fieldnames=fieldnames)
-	writer.writerow(dict((fn,fn) for fn in fieldnames))
-	for row in status_array:
-		writer.writerow(row)
 
 def get_alert_status():
-	"""
-	get_alert_status checks a file called alert_status.csv.
-	If the status of the file is a 1, then the system is in alert status waiting for a response
-	If the status of this file is a 0, then the system is operating normally
-	"""
-	status_file = open(csv_status_file)
+    """
+    get_alert_status checks a file called alert_status.csv.
+    If the status of the file is a 1, then the system is in alert status waiting for a response
+    If the status of this file is a 0, then the system is operating normally
+    """
+    
+    if os.path.exists(csv_status_file):
+        status_file = open(csv_status_file)
         reader = csv.DictReader(status_file)
-	for row in reader:
-		return int(row['status']), int(row['code']), row['description']
+        for row in reader:
+            return int(row['status']), int(row['code']), row['description']
+    else:
+        return 0, 0, None
+
 
 def main():
-	#Check to see if an alert has already been sent but not addressed.
-	#This will prevent duplcate alerts
-	status, code, description = get_alert_status()
-	minute = datetime.datetime.now().minute
-	if status:
-		resolved = check_for_resolution(code, description)
-		if not resolved:
-			return
-	elif (minute%report_frequency) > 0: #if we are not in an alert, only run the test every 15 minutes
-		return
+    '''Check to see if an alert has already been sent but not addressed.
+      This will prevent duplcate alerts'''
+    
+    status, code, description = get_alert_status()
+    
+    now = datetime.datetime.now()
+    seconds_after_midnight = now.hour * 3600 + now.minute * 60 + now.second
+    cur_hour = now.hour
+    cur_day_of_week = now.weekday()
+    
+    if status:
+        resolved = check_for_resolution(code, description)
+        if not resolved:
+            return
+    elif days_of_week_to_report[cur_day_of_week] == 0:
+        # don't send reports on disabled days of week
+        return
+    elif seconds_after_midnight < START_OF_DAY:
+        return
+    elif seconds_after_midnight > END_OF_DAY:
+        return
+    elif cur_hour in report_hours:
+        # find the last hour a report was sent
+        with open(report_status_file) as f:
+            last_hour_sent = int(f.read())
+        if last_hour_sent == cur_hour:
+            return
+        else:
+            # write last hour
+            with open(report_status_file, 'wb') as f:
+                f.write(str(cur_hour))
+    else:
+        return
 
-        # Unique API URL (root)
-        url = root_url
+    # Unique API URL (root)
+    url = root_url
 
-        # Limiting factor for number of stops to cycle through
-        factor = 100
+    # Limiting factor for number of stops to cycle through
+    factor = 100
 
-        result, agencies = getAgencies(url)
+    result, agencies = get_agencies(url)
+    if not result:
+        create_alert('Problem getting agencies.  {0}'.format(agencies))
+        return
+
+    report = ""
+
+    for agency in agencies:
+        
+        result, stops = get_stops(url, agency)
         if not result:
-                report = agencies
+            report = stops
+            create_alert(report)
+            continue
+
+        lim = len(stops) / factor
+        stopIndex = 0
+        counts = dict(predicted=0,
+                      scheduled=0,
+                      perfect=0)
+            
+        for stop in stops:
+            
+            stopIndex += 1
+            result, message = check_arrivals(url, stop, counts)
+            if not result:
+                report = message
                 create_alert(report)
-                return
+                break
+            if stopIndex > lim:
+                break
 
-        report = ""
+        # These are sanity checks for the various agencies.  
+        # They will only be run if the agency ID is in the realtime_agencies list
+        if not(agency['agencyId'] in realtime_agencies):
+            pass
+            # print agency['agencyId'] + " is not included in the realtime test."
+        elif counts['predicted'] < counts['scheduled']:
+            create_alert(agency['agencyId'] + " has < 50% predicted arrivals at select stops.")
+        elif counts['predicted'] + counts['scheduled'] == 0:
+            create_alert(agency['agencyId'] + " is not returning any schedule or predicted times!")
+        elif float(counts['perfect']) / float(counts['predicted']) > .9:
+            create_alert(agency['agencyId'] + " is reporting > 90% perfect predictions.")
+        else:
+            # print agency['agencyId'] + " is looking good."
+            pass
 
-        for agency in agencies:
+        for s in ["\n\n" + agency['agencyId'],
+                  "\n\nTrips with real-time: " + str(counts['predicted']),
+                  " of " + str(counts['scheduled'] + counts['predicted']),
+                  "\nTrips without real-time: " + str(counts['scheduled']),
+                  " of " + str(counts['scheduled'] + counts['predicted']),
+                  "\nPerfect predictions: " + str(counts['perfect']),
+                  " of " + str(counts['scheduled'] + counts['predicted'])]:
+            report += s
 
-                result, stops = getStops(url, agency)
-                if not result:
-                        report = stops
-			create_alert(report)
-                        continue
-
-                lim = len(stops)/factor
-                stopIndex = 0
-                counts = {
-                        'predicted' : 0,
-                        'scheduled' : 0,
-                        'perfect' : 0
-                        }
-
-                for stop in stops:
-                        stopIndex += 1
-                        result, message = checkArrivals(url, stop, counts)
-                        if not result:
-                                report = message
-				create_alert(report)
-                                break
-                        if stopIndex > lim:
-                                break
-
-                #These are sanity checks for the various agencies.  They will only be run if the agency ID is in the realtime_agencies list
-                if not(agency['agencyId'] in realtime_agencies):
-                        print agency['agencyId'] + " is not included in the realtime test."
-                elif datetime.datetime.now().hour < START_OF_DAY:
-                        print 'It is before ' + START_OF_DAY + ' , dont send an alert'
-                elif counts['predicted'] < counts['scheduled']:
-			create_alert(agency['agencyId'] + " is batting < .500")
-                elif counts['predicted'] + counts['scheduled'] == 0:
-			create_alert(agency['agencyId'] + " is not returning any schedule or predicted times!")
-		elif float(counts['perfect'])/float(counts['predicted']) > .9:
-                        create_alert(agency['agencyId'] + " is reporting > 90% perfect predictions.")
-		else:
-                        print agency['agencyId'] + " is looking good."
-
-                report += "\n\n" + agency['agencyId'] + "\n\nTrips with real-time: " + str(counts['predicted'])+ " of " + str(counts['scheduled'] + counts['predicted']) + "\nTrips without real-time: " + str(counts['scheduled'])+ " of " + str(counts['scheduled'] + counts['predicted']) + "\nPerfect predictions: " + str(counts['perfect']) + " of " + str(counts['scheduled'] + counts['predicted'])
-
-
-        sendGmail(report_list, report, 'OBA Report')
+    send_gmail(report_list, report, 'OBA Report')
 
 if __name__ == '__main__':
     main()
