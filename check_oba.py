@@ -32,34 +32,38 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.utils import formatdate
 
-config_filename = 'path\to\watchdog.ini'
-config = ConfigParser.ConfigParser()
-config.read(config_filename)
+CONFIG_FILENAME = '/path/to/watchdog.ini'
+CONFIG = ConfigParser.ConfigParser()
+CONFIG.read(CONFIG_FILENAME)
+
 
 def get_config(key):
-    return config.get('DEFAULT', key)
+    return CONFIG.get('DEFAULT', key)
 
 # PARAMETERS
 
 # Agency ids for agencies with realtime data.
-realtime_agencies = get_config('realtime_agencies').split(',')
+REALTIME_AGENCIES = get_config('realtime_agencies').split(',')
 # These people get an email every time there is an alert.
-alert_list = get_config('alert_list').split(',') 
+ALERT_LIST = get_config('alert_list').split(',') 
 # These people get an email every time that check_oba.py is run
-report_list = get_config('report_list').split(',')
-from_address = get_config('from_address')
+REPORT_LIST = get_config('report_list').split(',')
+FROM_ADDRESS = get_config('from_address')
 
-csv_status_file = get_config('csv_status_file')
-report_status_file = get_config('report_status_file')
-root_url = get_config('root_url')
+CSV_STATUS_FILE = get_config('csv_status_file')
+REPORT_STATUS_FILE = get_config('report_status_file')
+ROOT_URL = get_config('root_url')
 
 # If 1, report, else don't.  index 0 = Monday, 6 = Sunday
-days_of_week_to_report = map(int, get_config('days_of_week_to_report').split(','))
+DAYS_OF_WEEK_TO_REPORT = map(int, get_config('days_of_week_to_report').split(','))
 # The hours when a report gets sent.  SPECIFY AT LEAST TWO HOURS
-report_hours = map(int, get_config('report_hours').split(','))  
-# The hour that we start checking, we stop at midnight
+REPORT_HOURS = map(int, get_config('report_hours').split(','))  
+# The seconds after midnight that we start and stop checking
 START_OF_DAY = int(get_config('start_of_day'))
 END_OF_DAY = int(get_config('end_of_day'))
+
+# Limiting factor for number of stops to cycle through
+FACTOR = int(get_config('stop_test_factor'))
 
 API_KEY = get_config('api_key')
 
@@ -227,7 +231,7 @@ def check_for_resolution(code, description):
     if resolved:
         clear_alert(code, description)
         resolution_msg_template = "OBA Alert: {0}, {1} \nwas resolved by {2} at {3}.\n\nSOLUTION:  {4}"
-        send_gmail(alert_list, 
+        send_gmail(ALERT_LIST, 
                    resolution_msg_template.format(code,
                                                   description,
                                                   resolver,
@@ -241,10 +245,8 @@ def check_for_resolution(code, description):
 
 def send_gmail(recipients, message, subject):
 
-    FROM = from_address
-
     msg = MIMEMultipart()
-    msg["From"] = FROM
+    msg["From"] = FROM_ADDRESS
     msg["Subject"] = subject
     msg['Date'] = formatdate(localtime=True)
     message1 = MIMEText(message, 'plain')
@@ -254,14 +256,14 @@ def send_gmail(recipients, message, subject):
     server = smtplib.SMTP(SMTP_HOST)
     server.starttls()
     server.login(USERNAME, PASSWORD)
-    server.sendmail(FROM, recipients, msg.as_string())
+    server.sendmail(FROM_ADDRESS, recipients, msg.as_string())
     server.close()
 
 
 def clear_alert(code, description):
 
     # Update the status code in the alert_status.csv file
-    status_file = open(csv_status_file, 'wb')
+    status_file = open(CSV_STATUS_FILE, 'wb')
     status_array = []
     status_array.append({'status': 0, 'code': code, 'description': description})
     fieldnames = ['status', 'code', 'description']
@@ -278,10 +280,10 @@ def create_alert(description):
     code += 1
     
     # Send the relevant emails and texts
-    send_gmail(alert_list, description, "OBA Alert!: " + str(code) + '.')
+    send_gmail(ALERT_LIST, description, "OBA Alert!: " + str(code) + '.')
 
     # Update the status code in the alert_status.csv file
-    status_file = open(csv_status_file, 'wb')
+    status_file = open(CSV_STATUS_FILE, 'wb')
     status_array = [{'status': 1, 'code': code, 'description': description}]
     fieldnames = ['status', 'code', 'description']
     writer = csv.DictWriter(status_file, delimiter=',', fieldnames=fieldnames)
@@ -297,8 +299,8 @@ def get_alert_status():
     If the status of this file is a 0, then the system is operating normally
     """
     
-    if os.path.exists(csv_status_file):
-        status_file = open(csv_status_file)
+    if os.path.exists(CSV_STATUS_FILE):
+        status_file = open(CSV_STATUS_FILE)
         reader = csv.DictReader(status_file)
         for row in reader:
             return int(row['status']), int(row['code']), row['description']
@@ -321,33 +323,30 @@ def main():
         resolved = check_for_resolution(code, description)
         if not resolved:
             return
-    elif days_of_week_to_report[cur_day_of_week] == 0:
+    elif DAYS_OF_WEEK_TO_REPORT[cur_day_of_week] == 0:
         # don't send reports on disabled days of week
         return
     elif seconds_after_midnight < START_OF_DAY:
         return
     elif seconds_after_midnight > END_OF_DAY:
         return
-    elif cur_hour in report_hours:
+    elif cur_hour in REPORT_HOURS:
         # find the last hour a report was sent
-        with open(report_status_file) as f:
-            last_hour_sent = int(f.read())
+        if os.path.exists(REPORT_STATUS_FILE):
+            with open(REPORT_STATUS_FILE) as f:
+                last_hour_sent = int(f.read())
+        else:
+            last_hour_sent = -1
         if last_hour_sent == cur_hour:
             return
         else:
             # write last hour
-            with open(report_status_file, 'wb') as f:
+            with open(REPORT_STATUS_FILE, 'wb') as f:
                 f.write(str(cur_hour))
     else:
         return
 
-    # Unique API URL (root)
-    url = root_url
-
-    # Limiting factor for number of stops to cycle through
-    factor = 100
-
-    result, agencies = get_agencies(url)
+    result, agencies = get_agencies(ROOT_URL)
     if not result:
         create_alert('Problem getting agencies.  {0}'.format(agencies))
         return
@@ -356,13 +355,13 @@ def main():
 
     for agency in agencies:
         
-        result, stops = get_stops(url, agency)
+        result, stops = get_stops(ROOT_URL, agency)
         if not result:
             report = stops
             create_alert(report)
             continue
 
-        lim = len(stops) / factor
+        lim = len(stops) / FACTOR
         stopIndex = 0
         counts = dict(predicted=0,
                       scheduled=0,
@@ -371,7 +370,7 @@ def main():
         for stop in stops:
             
             stopIndex += 1
-            result, message = check_arrivals(url, stop, counts)
+            result, message = check_arrivals(ROOT_URL, stop, counts)
             if not result:
                 report = message
                 create_alert(report)
@@ -381,7 +380,7 @@ def main():
 
         # These are sanity checks for the various agencies.  
         # They will only be run if the agency ID is in the realtime_agencies list
-        if not(agency['agencyId'] in realtime_agencies):
+        if not(agency['agencyId'] in REALTIME_AGENCIES):
             pass
             # print agency['agencyId'] + " is not included in the realtime test."
         elif counts['predicted'] < counts['scheduled']:
@@ -403,7 +402,7 @@ def main():
                   " of " + str(counts['scheduled'] + counts['predicted'])]:
             report += s
 
-    send_gmail(report_list, report, 'OBA Report')
+    send_gmail(REPORT_LIST, report, 'OBA Report')
 
 if __name__ == '__main__':
     main()
