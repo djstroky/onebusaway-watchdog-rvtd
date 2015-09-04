@@ -42,7 +42,7 @@ In this fork, you'll need to put all of the sensitive information in the config 
 | report_list | A comma seperated list of emails that will be sent report emails. |
 | report_status_file | Path to a file that can be created by the program. |
 | root_url | The root URL for the onebusaway-api-webapp. |
-| SMTP_HOST | The smtp host to use.  If using Gmail, set to `smtp.gmail.com:587`. |
+| smtp_host | The smtp host to use.  If using Gmail, set to `smtp.gmail.com:587`. |
 | start_of_day | The seconds after midnight which checks should start for the day. |
 | stop_test_factor | A divisory factor to determine how many stops to investigate realtime data for.  Example num_stops_to_check = total_num_stops / stop_test_factor. |
 | username | The login username of the email account. |
